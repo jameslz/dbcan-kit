@@ -1,8 +1,7 @@
 ### dbcan-kit: CAZymes annotation using dbCAN
-<br>
+<hr>
 
-
-#### 1. Get Start
+#### 1. Introduction
 
 We shuffle the input protein dataset, split it into multiple chuncks, then use hmmscan to submit parallel jobs.
 
