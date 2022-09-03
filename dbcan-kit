@@ -1,0 +1,231 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+use Getopt::Std;
+use File::Basename;
+use Cwd 'abs_path';
+
+my $version = "0.0.4";
+
+my %opts = (t => 40,
+            e => 1e-15,
+            c => 35,
+            d => '/biostack/database/dbcan');
+getopts('t:e:c:d:', \%opts);
+
+&usage if (-t STDIN && @ARGV != 2);
+
+my  $prot           =  shift @ARGV;
+my  $project_home   =  shift @ARGV;
+
+my  $runs           =  qq{$project_home/runs};
+my  $report         =  qq{$project_home/report};
+my  $hmmscan        =  qq{$project_home/hmmscan};
+
+my  $binaries       =  dirname( abs_path($0) ) . '/binaries';
+my  $utils          =  dirname( abs_path($0) ) . '/utils';
+
+my  $cnt            =  0;
+
+my  $cpus           =  $opts{t};
+my  $db             =  $opts{d};
+my  $evalue         =  $opts{e};
+my  $coverage       =  $opts{c};
+
+submit();
+exit;
+
+sub submit {
+
+    make_fs();
+    shuffle_run();
+    hmmscan_run();
+    pipe_run();
+    auxiliary_run();
+
+}
+
+sub make_fs {
+
+    my $cmd = qq{mkdir -p $report
+                          $runs
+                          $hmmscan/split};
+       $cmd =~ s/\n\s+/ /msg;
+    system $cmd;
+
+}
+
+sub shuffle_run {
+
+    my $sh = qq{$runs/shuffle.sh};
+    open (EXPORT, ">$sh") || die "[ERR]: can't open $sh $!\n";
+
+    print EXPORT shuffle();
+
+    close EXPORT;
+    system qq{bash $sh};
+
+}
+
+sub shuffle {
+
+    my $cmd   = qq{$binaries/fastx-utils view      \
+                      $prot                        \
+                   |$binaries/tsv-utils shuffle    \
+                      -                            \
+                   |$binaries/fastx-utils reorder  \
+                      $prot -                      \
+                   >$report/shuffle.fasta;\n};
+       $cmd   =~ s/\s+\n\s+/ /msg;
+    return $cmd;
+
+}
+
+sub hmmscan_run {
+
+    my $sh    =  qq{$runs/hmmscan.sh};
+    open (EXPORT, ">$sh") || die "[ERR]: can't open $sh $!\n";
+
+    $cnt  = `$binaries/fastx-utils partition $report/shuffle.fasta $cpus $hmmscan/split/p`;
+
+    foreach my $batch  (1 .. $cnt ){
+        next if(!-e  qq{$hmmscan/split/p\_$batch.fasta});
+        print EXPORT hmmscan( $batch );
+    }
+    close EXPORT;
+    system qq{cat $sh | $binaries/gargs -v --nlines 1 -p $cpus  '{}'};
+
+}
+
+sub hmmscan {
+
+    my $batch   = shift;
+    my $db      = $opts{d};    
+
+    my $cmd     = qq{$binaries/hmmscan                      \
+                        --cpu 1                             \
+                        -o /dev/null                        \
+                        --domtblout $hmmscan/split/$batch.domtblout \
+                        $db/dbcan.hmm                       \
+                        $hmmscan/split/p\_$batch.fasta;\n};
+       $cmd =~ s/\s+\n\s+/ /msg;
+    return $cmd;
+
+}
+
+sub pipe_run {
+
+    my $sh    =  qq{$runs/pipe.sh};
+    open (EXPORT, ">$sh") || die "[ERR]: can't open $sh $!\n";
+
+    print EXPORT  concat();
+    print EXPORT  hmmscan_parser();
+    print EXPORT  subfamily_bin();
+    print EXPORT  family_bin();
+
+    close EXPORT;
+    system qq{cat $sh | $binaries/gargs -v -nlines 1 -p 1 '{}'};
+}
+
+sub concat {
+
+    my $cmd  = qq{cat $hmmscan/split/*.domtblout       \
+                     >$hmmscan/hmmscan.domtblout ;\n};
+       $cmd  =~ s/\s+\n\s+/ /msg;
+    return $cmd;
+
+}
+
+sub hmmscan_parser {
+
+    my $cmd  = qq{$utils/hmmscan-parser.py            \
+                     $hmmscan/hmmscan.domtblout       \
+                     $evalue $coverage                \
+                  | sed \'s\/.hmm\/\/\'               \
+                  |$binaries/tsv-utils add_headline   \
+                   \"#Family HMM\\tHMM length\\tQuery ID\\tQuery length\\tE-value\\tHMM start\\tHMM end\\tQuery start\\tQuery end\\tCoverage\" - \
+                  >$report/dbcan.txt ;\n};
+       $cmd =~ s/\s+\n\s+/ /msg;
+    return $cmd;
+
+}
+
+sub subfamily_bin {
+
+    my $cmd = qq{cut -f1,3  $report/dbcan.txt       \
+                |grep -v "#"                        \
+                |$binaries/tsv-utils bins           \
+                   -t 1 -s 2 -                      \
+                |tail -n +2                         \
+                |$binaries/tsv-utils add_headline   \
+                    "#subfamily\\tnumber\\tmembers" \
+                    -                               \
+                >$report/subfamily-bins.txt ;\n};
+       $cmd =~ s/\s+\n\s+/ /msg; 
+    return $cmd;
+
+}
+
+sub family_bin {
+
+    my $cmd  = qq{cut -f1,3 $report/dbcan.txt        \
+                  |grep -v "#"                       \
+                  |$binaries/tsv-utils annotation    \
+                      -c 1                           \
+                      $db/misc/family.txt -          \
+                  |$binaries/tsv-utils bins          \
+                     -t 3 -s 2 -                     \
+                  |tail -n +2                        \
+                  |$binaries/tsv-utils add_headline  \
+                    "#family\\tnumber\\tmembers"     \
+                    -                                \
+                  >$report/family-bins.txt ;\n};
+       $cmd  =~ s/\s+\n\s+/ /msg; 
+    return $cmd;
+
+}
+
+sub auxiliary_run {
+
+    my $sh =  qq{$runs/auxiliary.sh}; 
+    open (EXPORT, ">$sh") || die "[ERR]: can't open $sh $!\n";
+
+    print EXPORT  tsv2xlsx();
+    print EXPORT  qq{rm -rf $hmmscan/split ;\n};
+    print EXPORT  qq{rm -rf $report/shuffle.fasta ;\n};
+
+    close EXPORT;
+    system qq{bash $sh};
+
+}
+
+sub tsv2xlsx {
+
+    my $cmd = qq{$binaries/tsv-utils tsv2xlsx            \
+                    $report/dbcan.xlsx                   \
+                    dbcan:$report/dbcan.txt              \
+                    subfamily:$report/subfamily-bins.txt \
+                    family:$report/family-bins.txt;\n};
+       $cmd =~ s/\s+\n\s+/ /msg;
+    return $cmd;
+
+}
+
+sub usage {
+
+    printf STDERR qq(
+
+Program: dbcan-kit: HMM based CAZYmer annotation.
+Version: $version
+Contact: ZHANG LEI <zhanglei\@logicinformatics.com>\n
+Usage:   dbcan-kit [options] <sequence> <project>\n
+Options: -t INT    CPU number, default: [40]
+         -e FLOAT  evalue for cazy annotation. default: [1e-15]
+         -c FLOAT  HMM profile coverage. default: [0.35]
+         -d STR    database location, default: [/biostack/database/dbcan]
+
+);
+    exit;
+
+}

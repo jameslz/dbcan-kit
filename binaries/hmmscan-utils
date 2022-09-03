@@ -1,0 +1,204 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+use File::Basename;
+use Cwd 'abs_path';
+use Switch;
+
+my $utils =  dirname( abs_path($0) );
+my $usage = <<_EOUSAGE_;
+
+Usage: hmmscan-utils <command> <arguments>
+supports:
+
+domtblout       <domtblout>
+resolve         <domtblout>
+
+_EOUSAGE_
+;
+
+if( ( scalar @ARGV) < 1){
+    printf STDERR $usage;
+    exit;
+
+}
+
+my $cmd           = shift @ARGV; 
+my $percentage    = 0.4;
+my %domains       = ();
+
+switch($cmd){
+
+    case "domtblout"         { domtblout_run(); }
+    case "resolve"           { resolve_run(); }
+
+}
+
+exit;
+
+sub domtblout_run{
+
+    if(@ARGV != 1){
+        printf STDERR qq{\n[ERR] arguments number error!\n$usage};
+        exit;
+    }
+
+    my ($domtblout ) = @ARGV;
+    fmt_domtblout( $domtblout );
+
+}
+
+sub fmt_domtblout{
+	
+	my $domtblout  = shift;
+    print qq{#query\tquery_len\ttarget\ttarget_len\tScore\tc-Evalue\ti-Evalue\tHmmFrom\tHmmTo\tAlifrom\tAliTo\tEnvFrom\tEnvTo\thmm_coverge_rate\tquery_coverge\n}; 
+    
+
+    my $fh;
+    ($domtblout eq '-') ? ( $fh = "STDIN" ) :
+   				   (open( $fh, $domtblout ) || die "$!\n");
+    while (<$fh>) {
+        chomp;
+        next if(/^#/);
+        my @its = split /\s+/, $_;
+
+        my $hmm_coverge_rate  = sprintf("%.2f", (abs($its[16]  - $its[15]) + 1)/$its[2]);
+        my $hit_fragment      = abs($its[18] - $its[17]);
+        my $query_coverge     = sprintf("%.2f", $hit_fragment/$its[5]);
+
+        next if($hmm_coverge_rate < $percentage);
+        my $print = qq{$its[3]\t$its[5]\t$its[0]\t$its[2]\t$its[13]\t$its[11]\t$its[12]\t$its[15]\t$its[16]\t$its[17]\t$its[18]\t$its[19]\t$its[20]\t$hmm_coverge_rate\t$query_coverge\n};
+        
+        if($hit_fragment > 80){
+            print $print if( $its[12] < 1e-5);
+        }else{
+            print $print if($its[12]  < 1e-4);
+        }
+
+    }
+    close $fh;
+
+}
+
+sub resolve_run{
+
+    if(@ARGV != 1){
+        printf STDERR qq{\n[ERR] arguments number error!\n$usage};
+        exit;
+    }
+
+    my ($domtblout ) = @ARGV;
+    load_domtblout( $domtblout );
+    resolve_domtblout();
+
+}
+
+sub load_domtblout {
+
+	my $domtblout  = shift;	
+
+    my $fh;
+    ($domtblout eq '-') ? ( $fh = "STDIN" ) :
+   				   (open( $fh, $domtblout ) || die "$!\n");
+
+    my $title = <$fh>; print $title;
+
+    while (<$fh>) {
+        
+        my @its = split /\t/, $_;        
+        $domains{ $its[0] }{$.}{info}     =  $_;
+        $domains{ $its[0] }{$.}{evalue}   =  $its[6];
+        $domains{ $its[0] }{$.}{envelope} = qq{$its[9]\t$its[10]};
+        
+    }
+    close $fh;
+}
+
+sub resolve_domtblout {
+    
+    foreach my $query  (keys %domains){
+        my $identifiers = domain_resolve( $query );        
+        foreach my $it ( @{$identifiers } ){
+            print $domains{ $query }{ $it} {info};
+        }
+    
+    }
+}
+
+sub domain_resolve{
+    
+    my  $query       = shift;
+    my  @identifiers = ();
+    my  @envs        = ();
+    
+    foreach my $acc(sort  { $domains{$query}{$a}{evalue} <=>  $domains{$query}{$b}{evalue}} keys %{$domains{$query}}){
+        
+        if(scalar @identifiers  == 0){
+            
+            push    @envs           ,  $domains{$query}{$acc}{envelope};
+            push    @identifiers    ,  $acc;
+            next;
+        }
+        
+        my $label = 1;
+        
+        my $envL  = $domains{$query}{$acc}{envelope};
+         
+        foreach my $env  (sort {left_envelope( $a )  <=>  left_envelope( $b )} @envs){
+
+            my $tag = domain_overlap($envL, $env);
+            
+            if($tag eq 0){
+                $label=0;
+                last;
+            }
+        }
+
+        if($label eq  1){
+            push    @envs          ,  $domains{$query}{$acc}{envelope};
+            push    @identifiers   ,  $acc;
+        }
+    }
+    
+    return  \@identifiers;
+
+}
+
+sub left_envelope{
+    
+    my $val   =  shift;
+    my ($ret) = $val =~/^(\d+)/;
+    return $ret;
+
+}
+
+sub domain_overlap{
+    
+    my ($query, $subject)    = @_;
+    
+    my ($q_from, $q_to) = split /\s+/, $query;
+    my ($s_from, $s_to) = split /\s+/, $subject;
+    
+    return 1 if( $q_to <= $s_from ||  $q_from   >=   $s_to    );
+    return 0 if( $q_to >= $s_to   &&  $q_from   <=   $s_from  );
+    return 0 if( $q_to <= $s_to   &&  $q_from   >=   $s_from  );
+    
+    my $q_length   = $q_to - $q_from + 1;
+    my $s_length   = $s_to - $s_from + 1;
+    
+    my $overlap_length = 0;
+    
+    if($s_from   <  $q_to  &&  $q_from <  $s_from){
+        $overlap_length = $q_to - $s_from + 1;
+    }elsif($s_to >$q_from  &&  $s_to < $q_to ){
+        $overlap_length = $s_to - $q_from + 1;    
+    }
+    
+    if($overlap_length <= 30 &&  (($overlap_length/$q_length) < 0.5)  &&  (($overlap_length/$s_length) < 0.5)){
+            return 1;
+    }else{
+            return 0;
+    }
+
+}
